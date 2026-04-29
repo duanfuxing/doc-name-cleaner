@@ -5,6 +5,7 @@
     rename.exe -d D:\docs                      # 指定待处理目录
     rename.exe -k D:\my_keywords.txt           # 指定关键词文件
     rename.exe --dry-run                       # 预览模式，不实际重命名
+    rename.exe --no-recursive                  # 不递归，仅扫描当前目录
 
 双击运行:
     直接双击 exe，进入交互模式，按提示操作即可
@@ -60,37 +61,59 @@ def find_matching_prefix(filename_stem: str, keywords: list[str]) -> str | None:
     return None
 
 
-def process_directory(target_dir: str, keywords: list[str], dry_run: bool = False) -> dict:
+def collect_doc_files(target_dir: str, recursive: bool = False) -> list[tuple[str, str]]:
+    """收集 doc/docx 文件，返回 (所在目录, 文件名) 列表"""
+    valid_extensions = {".doc", ".docx"}
+    doc_files = []
+
+    if recursive:
+        for dirpath, _, filenames in os.walk(target_dir):
+            for f in filenames:
+                if os.path.splitext(f)[1].lower() in valid_extensions:
+                    doc_files.append((dirpath, f))
+    else:
+        for f in os.listdir(target_dir):
+            if os.path.isfile(os.path.join(target_dir, f)):
+                if os.path.splitext(f)[1].lower() in valid_extensions:
+                    doc_files.append((target_dir, f))
+
+    return doc_files
+
+
+def process_directory(target_dir: str, keywords: list[str], dry_run: bool = False, recursive: bool = False) -> dict:
     """扫描目录，处理所有 doc/docx 文件，返回统计结果"""
     result = {"renamed": 0, "skipped": 0, "errors": 0}
-    changed_list = []    # 改动详情: (原文件名, 新文件名, 匹配关键词)
-    unchanged_list = []  # 未改动文件名列表
-    error_list = []      # 失败/冲突详情: (文件名, 原因)
+    changed_list = []    # 改动详情: (显示路径, 新文件名, 匹配关键词)
+    unchanged_list = []  # 未改动文件显示路径列表
+    error_list = []      # 失败/冲突详情: (显示路径, 原因)
 
     if not os.path.isdir(target_dir):
         print(f"[错误] 目录不存在: {target_dir}")
         return result
 
-    valid_extensions = {".doc", ".docx"}
-
-    files = [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f))]
-    doc_files = [f for f in files if os.path.splitext(f)[1].lower() in valid_extensions]
+    doc_files = collect_doc_files(target_dir, recursive)
 
     if not doc_files:
-        print(f"[提示] 目录中没有 doc/docx 文件: {target_dir}")
+        scope = "目录及子文件夹" if recursive else "目录"
+        print(f"[提示] {scope}中没有 doc/docx 文件: {target_dir}")
         return result
 
-    print(f"找到 {len(doc_files)} 个 doc/docx 文件")
+    scope_label = "（含子文件夹）" if recursive else ""
+    print(f"找到 {len(doc_files)} 个 doc/docx 文件{scope_label}")
     print(f"加载了 {len(keywords)} 个关键词")
     print("-" * 60)
 
-    for filename in sorted(doc_files):
+    for dirpath, filename in sorted(doc_files, key=lambda x: x[1]):
+        # 用相对路径做显示，方便区分子目录文件
+        rel_dir = os.path.relpath(dirpath, target_dir)
+        display_name = filename if rel_dir == "." else os.path.join(rel_dir, filename)
+
         stem, ext = os.path.splitext(filename)
         matched_kw = find_matching_prefix(stem, keywords)
 
         if matched_kw is None:
             result["skipped"] += 1
-            unchanged_list.append(filename)
+            unchanged_list.append(display_name)
             continue
 
         new_stem = stem[len(matched_kw):].lstrip()
@@ -98,38 +121,40 @@ def process_directory(target_dir: str, keywords: list[str], dry_run: bool = Fals
         # 清理后文件名为空的情况
         if not new_stem.strip():
             reason = "删除关键词后文件名为空"
-            print(f"[跳过] {reason}: {filename}")
+            print(f"[跳过] {reason}: {display_name}")
             result["skipped"] += 1
-            unchanged_list.append(filename)
+            unchanged_list.append(display_name)
             continue
 
         new_filename = new_stem + ext
-        old_path = os.path.join(target_dir, filename)
-        new_path = os.path.join(target_dir, new_filename)
+        old_path = os.path.join(dirpath, filename)
+        new_path = os.path.join(dirpath, new_filename)
+
+        new_display = new_filename if rel_dir == "." else os.path.join(rel_dir, new_filename)
 
         # 检查目标文件是否已存在
         if os.path.exists(new_path):
-            reason = f"目标文件已存在: {new_filename}"
-            print(f"[冲突] {reason}，跳过: {filename}")
+            reason = f"目标文件已存在: {new_display}"
+            print(f"[冲突] {reason}，跳过: {display_name}")
             result["errors"] += 1
-            error_list.append((filename, reason))
+            error_list.append((display_name, reason))
             continue
 
         if dry_run:
-            print(f"[预览] {filename}  ->  {new_filename}  (删除: \"{matched_kw}\")")
+            print(f"[预览] {display_name}  ->  {new_display}  (删除: \"{matched_kw}\")")
             result["renamed"] += 1
-            changed_list.append((filename, new_filename, matched_kw))
+            changed_list.append((display_name, new_display, matched_kw))
         else:
             try:
                 os.rename(old_path, new_path)
-                print(f"[完成] {filename}  ->  {new_filename}  (删除: \"{matched_kw}\")")
+                print(f"[完成] {display_name}  ->  {new_display}  (删除: \"{matched_kw}\")")
                 result["renamed"] += 1
-                changed_list.append((filename, new_filename, matched_kw))
+                changed_list.append((display_name, new_display, matched_kw))
             except OSError as e:
                 reason = str(e)
-                print(f"[失败] {filename}: {reason}")
+                print(f"[失败] {display_name}: {reason}")
                 result["errors"] += 1
-                error_list.append((filename, reason))
+                error_list.append((display_name, reason))
 
     # 输出汇总报告
     print()
@@ -177,6 +202,7 @@ def run_cli():
     parser.add_argument("-d", "--dir", default=".", help="待处理的文件目录 (默认: 当前目录)")
     parser.add_argument("-k", "--keywords", default=default_kw, help=f"关键词文件路径 (默认: {default_kw})")
     parser.add_argument("--dry-run", action="store_true", help="预览模式，不实际修改文件")
+    parser.add_argument("--no-recursive", action="store_true", help="不递归，仅扫描当前目录")
     args = parser.parse_args()
 
     target_dir = os.path.abspath(args.dir)
@@ -184,13 +210,16 @@ def run_cli():
 
     print(f"目标目录: {target_dir}")
     print(f"关键词文件: {keywords_file}")
+    recursive = not args.no_recursive
+    print(f"递归子目录: {'是' if recursive else '否'}")
     print(f"模式: {'预览 (dry-run)' if args.dry_run else '实际执行'}")
     print("=" * 60)
 
     keywords = load_keywords(keywords_file)
     if not keywords:
         return
-    process_directory(target_dir, keywords, dry_run=args.dry_run)
+    recursive = not args.no_recursive
+    process_directory(target_dir, keywords, dry_run=args.dry_run, recursive=recursive)
 
 
 def run_interactive():
@@ -224,16 +253,21 @@ def run_interactive():
         input("\n按回车键退出...")
         return
 
+    # 3. 是否递归子文件夹（默认递归）
+    recursive_input = input("是否递归扫描子文件夹？(直接回车递归，输入 n 仅当前目录): ").strip().lower()
+    recursive = recursive_input != "n"
+
     print()
     print(f"目标目录: {target_dir}")
     print(f"关键词文件: {keywords_file}")
     print(f"关键词数量: {len(keywords)}")
+    print(f"递归子目录: {'是' if recursive else '否'}")
     print()
 
-    # 3. 先预览
+    # 4. 先预览
     print(">>> 预览模式：以下文件将被重命名")
     print("=" * 60)
-    preview = process_directory(target_dir, keywords, dry_run=True)
+    preview = process_directory(target_dir, keywords, dry_run=True, recursive=recursive)
 
     if preview["renamed"] == 0:
         print("\n没有需要重命名的文件。")
@@ -251,7 +285,7 @@ def run_interactive():
     print()
     print(">>> 正式执行重命名")
     print("=" * 60)
-    process_directory(target_dir, keywords, dry_run=False)
+    process_directory(target_dir, keywords, dry_run=False, recursive=recursive)
 
     input("\n按回车键退出...")
 
